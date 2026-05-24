@@ -1,0 +1,45 @@
+service: cloud-storage-wrapper-api
+
+provider:
+  name: aws
+  runtime: nodejs18.x
+  region: us-east-2
+  environment:
+    # Pass the bucket name dynamically to the Lambda environment
+    BUCKET_NAME: ${self:custom.bucketName}
+  iam:
+    role:
+      statements:
+        # Give Lambda permission to generate presigned URLs for this bucket
+        - Effect: Allow
+          Action:
+            - s3:PutObject
+          Resource:
+            - arn:aws:s3:::${self:custom.bucketName}/*
+
+custom:
+  # S3 bucket names must be globally unique across all of AWS.
+  # Change 'my-unique-wrapper-storage-bucket' to something unique to you.
+  bucketName: s9-master-storage-bucket
+
+functions:
+  getUploadUrl:
+    handler: handler.getUploadUrl
+    events:
+      - httpApi:
+          path: /request-upload
+          method: POST
+
+resources:
+  Resources:
+    # Explicitly provision the master S3 bucket
+    MasterStorageBucket:
+      Type: AWS::S3::Bucket
+      Properties:
+        BucketName: ${self:custom.bucketName}
+        # Optional: block public access to keep files completely secure
+        PublicAccessBlockConfiguration:
+          BlockPublicAcls: true
+          BlockPublicPolicy: true
+          IgnorePublicAcls: true
+          RestrictPublicBuckets: true

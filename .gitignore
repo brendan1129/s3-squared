@@ -1,2 +1,5 @@
-./.serverless
-./node_modules
+.serverless/
+node_modules/
+/AWSCLIV2.pkg
+/test_photo.jpg
+/package-lock.json
