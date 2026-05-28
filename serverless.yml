@@ -2,25 +2,30 @@ service: cloud-storage-wrapper-api
 
 provider:
   name: aws
-  runtime: nodejs18.x
-  region: us-east-2
+  runtime: nodejs20.x
+  region: us-east-1
   environment:
-    # Pass the bucket name dynamically to the Lambda environment
     BUCKET_NAME: ${self:custom.bucketName}
   iam:
     role:
       statements:
-        # Give Lambda permission to generate presigned URLs for this bucket
         - Effect: Allow
           Action:
             - s3:PutObject
           Resource:
             - arn:aws:s3:::${self:custom.bucketName}/*
-
+  httpApi:
+    cors: true
+    authorizers:
+      # Satisfies the local compiler while passing validation checks cleanly
+      cognitoAuthorizer:
+        type: jwt
+        identitySource: $request.header.Authorization
+        issuerUrl: https://cognito-idp.us-east-1.amazonaws.com/us-east-1_EN5lKzo0m
+        audience:
+          - 5q4anpk5dom2md9q7udb4vd5lo
 custom:
-  # S3 bucket names must be globally unique across all of AWS.
-  # Change 'my-unique-wrapper-storage-bucket' to something unique to you.
-  bucketName: s9-master-storage-bucket
+  bucketName: s9-master-bucket
 
 functions:
   getUploadUrl:
@@ -29,17 +34,59 @@ functions:
       - httpApi:
           path: /request-upload
           method: POST
+          authorizer:
+            name: cognitoAuthorizer
+  # NEW: Add the retrieval route
+  listFiles:
+    handler: handler.listFiles
+    events:
+      - httpApi:
+          path: /list-files
+          method: GET
+          authorizer:
+            name: cognitoAuthorizer
 
 resources:
   Resources:
-    # Explicitly provision the master S3 bucket
+    CognitoUserPool:
+      Type: AWS::Cognito::UserPool
+      Properties:
+        UserPoolName: cloud-wrapper-users-pool
+        UsernameAttributes:
+          - email
+        AutoVerifiedAttributes:
+          - email
+
+    CognitoUserPoolClient:
+      Type: AWS::Cognito::UserPoolClient
+      Properties:
+        ClientName: flutter-mobile-client
+        UserPoolId: !Ref CognitoUserPool
+        GenerateSecret: false
+
+    HttpApiAuthorizerCognitoAuthorizer:
+      Type: AWS::ApiGatewayV2::Authorizer
+      Properties:
+        Name: cloud-storage-cognito-authorizer
+        ApiId: !Ref HttpApi
+        AuthorizerType: JWT
+        IdentitySource:
+          - $request.header.Authorization
+        AuthorizerResultTtlInSeconds: 0 # Disables the 20-minute authorization cache layer
+        JwtConfiguration:
+          Audience:
+            - !Ref CognitoUserPoolClient
+          Issuer: !Sub https://cognito-idp.${AWS::Region}.amazonaws.com/${CognitoUserPool}
+    
     MasterStorageBucket:
       Type: AWS::S3::Bucket
       Properties:
         BucketName: ${self:custom.bucketName}
-        # Optional: block public access to keep files completely secure
-        PublicAccessBlockConfiguration:
-          BlockPublicAcls: true
-          BlockPublicPolicy: true
-          IgnorePublicAcls: true
-          RestrictPublicBuckets: true
+  # NEW: This forces AWS to spit out the exact IDs to your terminal screen
+  Outputs:
+    UserPoolId:
+      Value: !Ref CognitoUserPool
+      Description: "Use this value for _userPoolId in Flutter"
+    UserPoolClientId:
+      Value: !Ref CognitoUserPoolClient
+      Description: "Use this value for _clientId in Flutter"
