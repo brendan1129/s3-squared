@@ -10,24 +10,20 @@ provider:
     role:
       statements:
         - Effect: Allow
-          Action:
-            - s3:PutObject
-          Resource:
-            - arn:aws:s3:::${self:custom.bucketName}/*
-        # FIX: listFiles (ListObjectsV2) requires s3:ListBucket on the bucket itself,
-        # not on /* — without this every /list-files call returns AccessDenied
+          Action: [ s3:PutObject ]
+          Resource: [ arn:aws:s3:::${self:custom.bucketName}/* ]
         - Effect: Allow
-          Action:
-            - s3:ListBucket
-          Resource:
-            - arn:aws:s3:::${self:custom.bucketName}
+          Action: [ s3:ListBucket ]
+          Resource: [ arn:aws:s3:::${self:custom.bucketName} ]
+        - Effect: Allow
+          Action: [ s3:GetObject ]
+          Resource: [ arn:aws:s3:::${self:custom.bucketName}/* ]
+        - Effect: Allow
+          Action: [ s3:DeleteObject ]
+          Resource: [ arn:aws:s3:::${self:custom.bucketName}/* ]
   httpApi:
     cors: true
     authorizers:
-      # FIX: issuerUrl and audience now reference the dynamically created Cognito resources
-      # via CloudFormation intrinsics so they stay correct across every deploy/environment.
-      # The hardcoded us-east-1_EN5lKzo0m / 5q4anpk5... values only match one specific
-      # deployment and silently break when the stack is torn down and re-created.
       cognitoAuthorizer:
         type: jwt
         identitySource: $request.header.Authorization
@@ -42,20 +38,38 @@ functions:
   getUploadUrl:
     handler: handler.getUploadUrl
     events:
-      - httpApi:
-          path: /request-upload
-          method: POST
-          authorizer:
-            name: cognitoAuthorizer
+      - httpApi: { path: /request-upload, method: POST, authorizer: { name: cognitoAuthorizer } }
 
   listFiles:
     handler: handler.listFiles
     events:
-      - httpApi:
-          path: /list-files
-          method: GET
-          authorizer:
-            name: cognitoAuthorizer
+      - httpApi: { path: /list-files, method: GET, authorizer: { name: cognitoAuthorizer } }
+
+  getDownloadUrl:
+    handler: handler.getDownloadUrl
+    events:
+      - httpApi: { path: /download-url, method: GET, authorizer: { name: cognitoAuthorizer } }
+
+  deleteFile:
+    handler: handler.deleteFile
+    events:
+      - httpApi: { path: /delete-file, method: DELETE, authorizer: { name: cognitoAuthorizer } }
+
+  renameFile:
+    handler: handler.renameFile
+    events:
+      - httpApi: { path: /rename-file, method: POST, authorizer: { name: cognitoAuthorizer } }
+
+  # Move file cross-directory — same IAM as rename (GetObject + PutObject + DeleteObject)
+  moveFile:
+    handler: handler.moveFile
+    events:
+      - httpApi: { path: /move-file, method: POST, authorizer: { name: cognitoAuthorizer } }
+
+  createFolder:
+    handler: handler.createFolder
+    events:
+      - httpApi: { path: /create-folder, method: POST, authorizer: { name: cognitoAuthorizer } }
 
 resources:
   Resources:
@@ -63,10 +77,8 @@ resources:
       Type: AWS::Cognito::UserPool
       Properties:
         UserPoolName: cloud-wrapper-users-pool
-        UsernameAttributes:
-          - email
-        AutoVerifiedAttributes:
-          - email
+        UsernameAttributes: [ email ]
+        AutoVerifiedAttributes: [ email ]
 
     CognitoUserPoolClient:
       Type: AWS::Cognito::UserPoolClient
@@ -81,12 +93,10 @@ resources:
         Name: cloud-storage-cognito-authorizer
         ApiId: !Ref HttpApi
         AuthorizerType: JWT
-        IdentitySource:
-          - $request.header.Authorization
+        IdentitySource: [ $request.header.Authorization ]
         AuthorizerResultTtlInSeconds: 0
         JwtConfiguration:
-          Audience:
-            - !Ref CognitoUserPoolClient
+          Audience: [ !Ref CognitoUserPoolClient ]
           Issuer: !Sub https://cognito-idp.${AWS::Region}.amazonaws.com/${CognitoUserPool}
 
     MasterStorageBucket:
