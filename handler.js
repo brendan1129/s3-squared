@@ -1,7 +1,5 @@
-
-import { S3Client, PutObjectCommand } from "@aws-sdk/client-s3";
+import { S3Client, PutObjectCommand, ListObjectsV2Command } from "@aws-sdk/client-s3";
 import { getSignedUrl } from "@aws-sdk/s3-request-presigner";
-import { ListObjectsV2Command } from "@aws-sdk/client-s3";
 
 // Strict map correlating expected file extensions to matching explicit content-types
 const ALLOWED_MIME_TYPES = {
@@ -14,16 +12,9 @@ const ALLOWED_MIME_TYPES = {
     'pdf': 'application/pdf'
 };
 
-function isValidFileExtension(fileName, clientMimeType) {
-    const ext = fileName.split('.').last?.toLowerCase() || '';
-    const expectedMime = ALLOWED_MIME_TYPES[ext];
-    // Extension must be in our whitelist, and matching the explicit request header content-type
-    return expectedMime && expectedMime === clientMimeType;
-}
-// FORCE the exact regional endpoint target routing
-const s3Client = new S3Client({ 
-    region: "us-east-2",
-    endpoint: "https://s3.us-east-2.amazonaws.com"
+// Region matches the serverless.yml provider region (us-east-1)
+const s3Client = new S3Client({
+    region: "us-east-1"
 });
 
 const BUCKET_NAME = process.env.BUCKET_NAME;
@@ -33,48 +24,57 @@ export const getUploadUrl = async (event) => {
         // 1. EXTRACT SECURE AUTHENTICATED COGNITO USER ID
         // API Gateway populates these claims automatically when authorization passes
         const userId = event.requestContext?.authorizer?.jwt?.claims?.sub;
-        
+
         if (!userId) {
             return {
                 statusCode: 401,
-                body: json.stringify({ error: "Unauthorized access profile identifier context missing." })
+                // FIX: was `json.stringify` (undefined) — crashed instead of returning 401
+                body: JSON.stringify({ error: "Unauthorized: missing identity context." })
             };
         }
-        
-        if (!event.body) return { statusCode: 400, body: JSON.stringify({ error: "Missing body" }) };
+
+        if (!event.body) {
+            return { statusCode: 400, body: JSON.stringify({ error: "Missing body" }) };
+        }
+
         const { fileName, mimeType } = JSON.parse(event.body);
-        
+
+        if (!fileName || !mimeType) {
+            return { statusCode: 400, body: JSON.stringify({ error: "fileName and mimeType are required" }) };
+        }
+
         // 2. RUN STRICT FILE ATTRIBUTE SECURITY CHECKS
+        // FIX: was `.last` which is undefined on JS arrays — use `.pop()` on a copy
         const ext = fileName.split('.').pop()?.toLowerCase() || '';
         const expectedMime = ALLOWED_MIME_TYPES[ext];
-        
+
         if (!expectedMime || expectedMime !== mimeType) {
             return {
                 statusCode: 403,
-                body: JSON.stringify({ error: `File type restriction violation. Extension .${ext} conflicts with MIME verification mapping.` })
+                body: JSON.stringify({ error: `File type not permitted: .${ext} with MIME type ${mimeType}` })
             };
         }
-        
+
         // 3. ISOLATE ACCESS TO SPECIFIC USER SUBDIRECTORY PREFIXES
         const s3Key = `users/${userId}/${fileName}`;
-        
+
         const command = new PutObjectCommand({
             Bucket: BUCKET_NAME,
             Key: s3Key,
             ContentType: mimeType
         });
-        
+
         const uploadUrl = await getSignedUrl(s3Client, command, { expiresIn: 300 });
-        
+
         return {
             statusCode: 200,
-            headers: { 
+            headers: {
                 "Content-Type": "application/json",
-                "Access-Control-Allow-Origin": "*" 
+                "Access-Control-Allow-Origin": "*"
             },
             body: JSON.stringify({ uploadUrl, storageKey: s3Key })
         };
-        
+
     } catch (error) {
         return {
             statusCode: 500,
@@ -90,31 +90,27 @@ export const listFiles = async (event) => {
             return { statusCode: 401, body: JSON.stringify({ error: "Unauthorized" }) };
         }
 
-        // Get the current virtual directory path sent from Flutter (default to root)
         const queryParams = event.queryStringParameters || {};
-        const virtualPath = queryParams.prefix || ""; // e.g., "Photos/" or ""
-        
-        // S3 uses delimiter '/' to mimic traditional file systems logically
+        const virtualPath = queryParams.prefix || "";
+
         const userPrefix = `users/${userId}/${virtualPath}`;
 
         const command = new ListObjectsV2Command({
             Bucket: BUCKET_NAME,
             Prefix: userPrefix,
-            Delimiter: "/" 
+            Delimiter: "/"
         });
 
         const s3Response = await s3Client.send(command);
 
-        // 1. Extract Subfolders (S3 calls these CommonPrefixes)
+        // Extract subfolders (S3 CommonPrefixes)
         const folders = (s3Response.CommonPrefixes || []).map(cp => {
-            // Strip out the master path prefix so Flutter just gets the folder name
-            const fullPath = cp.Prefix;
-            return fullPath.replace(`users/${userId}/`, "");
+            return cp.Prefix.replace(`users/${userId}/`, "");
         });
 
-        // 2. Extract Files
+        // Extract files, excluding the directory placeholder key itself
         const files = (s3Response.Contents || [])
-            .filter(item => item.Key !== userPrefix) // Exclude the directory root itself
+            .filter(item => item.Key !== userPrefix)
             .map(item => ({
                 name: item.Key.replace(`users/${userId}/${virtualPath}`, ""),
                 size: item.Size,
@@ -123,7 +119,7 @@ export const listFiles = async (event) => {
 
         return {
             statusCode: 200,
-            headers: { 
+            headers: {
                 "Content-Type": "application/json",
                 "Access-Control-Allow-Origin": "*"
             },

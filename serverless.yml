@@ -14,16 +14,27 @@ provider:
             - s3:PutObject
           Resource:
             - arn:aws:s3:::${self:custom.bucketName}/*
+        # FIX: listFiles (ListObjectsV2) requires s3:ListBucket on the bucket itself,
+        # not on /* — without this every /list-files call returns AccessDenied
+        - Effect: Allow
+          Action:
+            - s3:ListBucket
+          Resource:
+            - arn:aws:s3:::${self:custom.bucketName}
   httpApi:
     cors: true
     authorizers:
-      # Satisfies the local compiler while passing validation checks cleanly
+      # FIX: issuerUrl and audience now reference the dynamically created Cognito resources
+      # via CloudFormation intrinsics so they stay correct across every deploy/environment.
+      # The hardcoded us-east-1_EN5lKzo0m / 5q4anpk5... values only match one specific
+      # deployment and silently break when the stack is torn down and re-created.
       cognitoAuthorizer:
         type: jwt
         identitySource: $request.header.Authorization
-        issuerUrl: https://cognito-idp.us-east-1.amazonaws.com/us-east-1_EN5lKzo0m
+        issuerUrl: !Sub https://cognito-idp.${AWS::Region}.amazonaws.com/${CognitoUserPool}
         audience:
-          - 5q4anpk5dom2md9q7udb4vd5lo
+          - !Ref CognitoUserPoolClient
+
 custom:
   bucketName: s9-master-bucket
 
@@ -36,7 +47,7 @@ functions:
           method: POST
           authorizer:
             name: cognitoAuthorizer
-  # NEW: Add the retrieval route
+
   listFiles:
     handler: handler.listFiles
     events:
@@ -72,17 +83,17 @@ resources:
         AuthorizerType: JWT
         IdentitySource:
           - $request.header.Authorization
-        AuthorizerResultTtlInSeconds: 0 # Disables the 20-minute authorization cache layer
+        AuthorizerResultTtlInSeconds: 0
         JwtConfiguration:
           Audience:
             - !Ref CognitoUserPoolClient
           Issuer: !Sub https://cognito-idp.${AWS::Region}.amazonaws.com/${CognitoUserPool}
-    
+
     MasterStorageBucket:
       Type: AWS::S3::Bucket
       Properties:
         BucketName: ${self:custom.bucketName}
-  # NEW: This forces AWS to spit out the exact IDs to your terminal screen
+
   Outputs:
     UserPoolId:
       Value: !Ref CognitoUserPool
